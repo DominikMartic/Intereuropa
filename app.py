@@ -1,164 +1,175 @@
 import io
-import os
-import re
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 st.set_page_config(
-    page_title="Kontrola Intereuropa Računa", page_icon="📦", layout="wide"
+    page_title="Sustav za Kontrolu i Analizu Logističkih Računa",
+    page_icon="📦",
+    layout="wide",
 )
 
-st.title("📦 Sustav za Kontrolu i Analizu Računa - Intereuropa")
+st.title("📦 Sustav za Kontrolu i Analizu Logističkih Računa")
 st.write(
-    "Učitaj Excel specifikaciju računa Intereurope. Sustav automatski"
-    " prepoznaje zone prema poštanskim brojevima, kontrolira rokove tranzita i"
-    " omogućuje pregled stavki."
+    "Automatska kontrola troškova prijevoza, dodataka za gorivo i dodatnih"
+    " usluga prema ugovornim uvjetima (s obračunom volumetrijske kilaže VOL. ×"
+    " 200)."
+)
+
+# Sidebar za upload
+st.sidebar.header("📁 Uvoz podataka")
+uploaded_file = st.sidebar.file_uploader(
+    "Učitaj Excel ili CSV tablicu s pošiljkama", type=["xlsx", "xls", "csv"]
 )
 
 
-# Određivanje zone prema poštanskom broju primatelja (Prilog 1 cjeniku Intereuropa)
-def odredi_intereuropa_zonu(pbr_primatelja):
-    try:
-        pbr = int(pbr_primatelja)
-    except:
-        return "Zona 2"
-
-    island_pbr = [
-        20230, 20240, 20242, 20243, 20244, 20245, 20246, 20247, 20248, 20250,
-        20260, 20263, 20264, 20267, 20269, 20270, 20271, 20272, 20273, 20274,
-        20275, 21400, 21403, 21404, 21405, 21410, 21412, 21413, 21420, 21423,
-        21424, 21425, 21426, 21450, 21454, 21460, 21462, 21463, 21465, 21466,
-        21467, 21468, 21469, 21480, 21483, 21485, 22240, 22242, 22243, 22244,
-        23212, 23234, 23249, 23250, 23251, 23262, 23263, 23264, 23271, 23272,
-        23273, 23274, 23275, 51280, 51281, 51500, 51511, 51512, 51513, 51514,
-        51515, 51516, 51517, 51521, 51522, 51523, 51550, 51551, 51554, 51555,
-        51556, 51557, 51559, 51564, 53291, 53294, 53296,
-    ]
-    if pbr in island_pbr:
-        return "Zona 3 (Otoci)"
-
-    prefix = pbr // 1000
-    if prefix == 53:
-        return "Zona 3"
-    elif prefix in [10, 44, 47, 49]:
-        return "Zona 1"
-    else:
-        return "Zona 2"
+@st.cache_data
+def load_data(file):
+  if file.name.endswith(".csv"):
+    df = pd.read_csv(file)
+  else:
+    df = pd.read_excel(file, header=1)
+  return df
 
 
-def izracunaj_radne_dane(datum_slanja, datum_dostave):
-    try:
-        d1 = pd.to_datetime(datum_slanja, errors="coerce")
-        d2 = pd.to_datetime(datum_dostave, errors="coerce")
-        if pd.isna(d1) or pd.isna(d2):
-            return None
-        b_days = (
-            pd.bdate_range(start=d1.normalize(), end=d2.normalize()).shape[0] - 1
-        )
-        return max(0, b_days)
-    except:
-        return None
-
-
-def to_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Izvjestaj")
-    return output.getvalue()
-
-
-uploaded_file = st.file_uploader(
-    "Učitaj Excel specifikaciju računa Intereurope", type=["xlsx", "csv"]
-)
-
+# Učitavanje podataka
+df = None
 if uploaded_file is not None:
-    if uploaded_file.name.endswith(".xlsx"):
-        df = pd.read_excel(uploaded_file, sheet_name=0, header=1)
+  df = load_data(uploaded_file)
+  st.sidebar.success("Tablica uspješno učitana!")
+else:
+  try:
+    df = load_data("PZ_INV_1_SPECIFIKACIJA_RACUNA(8).xlsx")
+    st.sidebar.success("Učitan zadani uzorak računa.")
+  except Exception:
+    st.sidebar.info("Molimo učitajte Excel specifikaciju računa.")
+
+
+# Definicija ugovornih cjenika po zonama
+package_prices = {
+    2: (3.37, 4.45, 6.13),
+    5: (3.83, 5.06, 7.05),
+    10: (4.68, 6.13, 8.35),
+    15: (5.52, 7.28, 9.81),
+    20: (6.36, 8.35, 11.19),
+    25: (7.13, 9.50, 12.88),
+    30: (8.05, 10.65, 13.95),
+    35: (10.23, 13.59, 16.87),
+    40: (11.25, 14.92, 19.45),
+    45: (12.19, 16.17, 20.78),
+    50: (13.20, 17.50, 22.65),
+    75: (18.28, 24.37, 29.84),
+    100: (22.11, 29.37, 35.46),
+    150: (24.03, 31.99, 38.19),
+    200: (25.70, 34.22, 40.66),
+    250: (28.96, 38.51, 46.07),
+    300: (32.07, 42.81, 50.29),
+    350: (37.80, 50.29, 58.88),
+    400: (43.37, 57.77, 67.48),
+    450: (47.48, 63.12, 74.06),
+    500: (50.64, 67.50, 78.44),
+    600: (58.10, 77.38, 89.30),
+    700: (69.52, 92.62, 106.72),
+}
+package_extra_100 = (10.45, 13.78, 17.42)
+
+pallet_prices = {
+    200: (23.01, 30.71, 36.46),
+    250: (26.01, 34.60, 41.41),
+    300: (28.77, 38.41, 45.13),
+    350: (34.48, 45.95, 53.78),
+    400: (39.51, 52.71, 61.62),
+    450: (42.65, 56.75, 66.49),
+    500: (46.34, 61.62, 71.61),
+    600: (53.06, 70.69, 81.60),
+    700: (63.47, 84.54, 97.47),
+}
+pallet_extra_100 = (9.49, 12.68, 15.95)
+
+
+def odredi_zonu(postanski_broj):
+  try:
+    pb = int(postanski_broj)
+  except:
+    return 1
+  if 10000 <= pb <= 10450:
+    return 0  # Zona 1
+  elif pb in [53200, 20260, 20290]:
+    return 2  # Zona 3
+  else:
+    return 1  # Zona 2
+
+
+def izracunaj_ugovornu_cijenu(row):
+  usluga = str(row.get("Usluga-naziv", "")).upper()
+  fizicka_tezina = row.get("Vred.osn./količ.", 0)
+  try:
+    fizicka_tezina = float(fizicka_tezina)
+  except:
+    fizicka_tezina = 0.0
+
+  # Čitanje volumena iz stupca "VOL." (uz rezervnu provjerom alternativnih naziva)
+  volumen = 0.0
+  for col_name in ["VOL.", "VOL", "Volumen", "M3", "Kubikaža"]:
+    if col_name in row and pd.notna(row[col_name]):
+      try:
+        volumen = float(row[col_name])
+        break
+      except:
+        pass
+
+  # Ako postoji volumen, volumetrijska kilaža = VOL. * 200, inače se uzima fizička težina
+  if volumen > 0:
+    tezina = volumen * 200
+  else:
+    tezina = fizicka_tezina
+
+  pb = row.get("Prim.-pošt.br.", 10000)
+  zone_idx = odredi_zonu(pb)
+  is_island_or_south = str(pb).startswith("20")
+
+  cijena = 0.0
+
+  # APSOLUTNI PRIORITET: Vraćanje paleta je uvijek fiksno 2.00 EUR po komadu
+  if "VRAĆANJE" in usluga or "VRAČANJE" in usluga:
+    kolicina = fizicka_tezina if fizicka_tezina > 0 else 1.0
+    return round(2.00 * kolicina, 2)
+
+  elif "EXPRESS" in usluga or "PAKET" in usluga or "PRIJEVOZ" in usluga:
+    thresholds = sorted(package_prices.keys())
+    if tezina <= thresholds[0]:
+      t = thresholds[0]
     else:
-        df = pd.read_csv(uploaded_file)
+      t = thresholds[-1]
+      for th in thresholds:
+        if tezina <= th:
+          t = th
+          break
+      if tezina > thresholds[-1]:
+        base_price = package_prices[700][zone_idx]
+        extra_blocks = max(0.0, ((tezina - 700) + 99.99) // 100)
+        cijena = base_price + extra_blocks * package_extra_100[zone_idx]
+    if cijena == 0.0:
+      cijena = package_prices[t][zone_idx]
 
-    st.success("Specifikacija uspješno učitana!")
+  elif "PALET" in usluga:
+    thresholds = sorted(pallet_prices.keys())
+    if tezina <= thresholds[0]:
+      t = thresholds[0]
+    else:
+      t = thresholds[-1]
+      for th in thresholds:
+        if tezina <= th:
+          t = th
+          break
+      if tezina > thresholds[-1]:
+        base_price = pallet_prices[700][zone_idx]
+        extra_blocks = max(0.0, ((tezina - 700) + 99.99) // 100)
+        cijena = base_price + extra_blocks * pallet_extra_100[zone_idx]
+    if cijena == 0.0:
+      cijena = pallet_prices[t][zone_idx]
 
-    if st.button("Pokreni kontrolu i analizu"):
-        rezultati = []
+  elif "GORIVO" in usluga:
+    cijena = 0.0
 
-        for idx, row in df.iterrows():
-            usluga = row.get("Usluga", 0)
-            usluga_naziv = row.get("Usluga-naziv", "")
-            pbr_primatelja = row.get("Prim.-pošt.br.", 10000)
-            masa = float(row.get("B.teža", row.get("Vred.osn./količ.", 0.0)))
-            naplaceni_iznos = float(row.get("Iznos (bezPDV)", 0.0))
-
-            d_slanja = row.get("Odlazak", None)
-            d_dostave = row.get("Dostava", None)
-            tranzit_dani = izracunaj_radne_dane(d_slanja, d_dostave)
-
-            zona = odredi_intereuropa_zonu(pbr_primatelja)
-
-            red = {
-                "RedniBroj": idx + 1,
-                "Broj Računa": row.get("Br.rač.", ""),
-                "Narudžba": row.get("Nar.", ""),
-                "Usluga": usluga_naziv,
-                "Primatelj": row.get("Primatelj", ""),
-                "Mjesto": row.get("Prim-mjesto", ""),
-                "Poštanski broj": pbr_primatelja,
-                "Zona": zona,
-                "Masa (kg)": masa,
-                "Slanje": d_slanja,
-                "Dostava": d_dostave,
-                "Tranzit (dana)": (
-                    tranzit_dani if tranzit_dani is not None else -1
-                ),
-                "Iznos (€ bez PDV)": round(naplaceni_iznos, 2),
-            }
-            rezultati.append(red)
-
-        res_df = pd.DataFrame(rezultati)
-
-        tab1, tab2, tab3 = st.tabs([
-            "📊 1. Pregled svih stavki računa",
-            "⛽ 2. Pregled dodataka za gorivo i usluga",
-            "⏱️ 3. Analiza tranzita pošiljaka",
-        ])
-
-        with tab1:
-            st.subheader("Sve stavke specifikacije")
-            st.dataframe(res_df, use_container_width=True)
-            st.download_button(
-                "📥 Preuzmi Excel (Sve stavke)",
-                to_excel(res_df),
-                "intereuropa_sve_stavke.xlsx",
-                (
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                ),
-            )
-
-        with tab2:
-            st.subheader("Pregled goriva i dodatnih usluga")
-            dodatne = res_df[~res_df["Usluga"].str.contains("EXPRESS", case=False, na=False)]
-            st.dataframe(dodatne, use_container_width=True)
-            st.download_button(
-                "📥 Preuzmi Excel (Dodatne usluge)",
-                to_excel(dodatne),
-                "intereuropa_dodatne_usluge.xlsx",
-                (
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                ),
-            )
-
-        with tab3:
-            st.subheader("Analiza radnih dana tranzita")
-            express_tranzit = res_df[res_df["Usluga"].str.contains("EXPRESS", case=False, na=False)]
-            st.dataframe(
-                express_tranzit[[
-                    "Narudžba",
-                    "Primatelj",
-                    "Mjesto",
-                    "Zona",
-                    "Slanje",
-                    "Dostava",
-                    "Tranzit (dana)",
-                ]],
-                use_container_width=True,
-            )
+  if is_island_or_south and zone_
